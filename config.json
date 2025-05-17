@@ -1,0 +1,7 @@
+{
+  "domain": "example.com",
+  "local_domain": "example.local",
+  "bind_ip": "192.168.1.2",
+  "server_ssh_address": "192.168.1.100",
+  "server_ssh_username": "cloud-user"
+}

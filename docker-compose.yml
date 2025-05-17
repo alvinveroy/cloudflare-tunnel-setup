@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token $${TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_TOKEN
+    volumes:
+      - ./certs:/etc/cloudflared/certs:ro
+    restart: always
+    networks:
+      - private-net
+
+  bind:
+    image: internetsystemsconsortium/bind9:9.18
+    volumes:
+      - ./bind/config:/etc/bind
+      - ./bind/zones:/var/lib/bind
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+    restart: always
+    networks:
+      - private-net
+
+networks:
+  private-net:
+    driver: bridge
