@@ -1,0 +1,5 @@
+[
+  {"subdomain": "dev", "local_ip": "192.168.1.10", "port": 8080, "type": "http"},
+  {"subdomain": "mqtt", "local_ip": "192.168.1.11", "port": 8883, "type": "tcp"},
+  {"subdomain": "ssh", "local_ip": "192.168.1.12", "port": 22, "type": "ssh"}
+]

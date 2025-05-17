@@ -1,0 +1,107 @@
+name: Deploy Cloudflare Tunnel and Bind Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Validate JSON files
+        run: |
+          jq . config.json > /dev/null || (echo "Invalid config.json" && exit 1)
+          jq . services.json > /dev/null || (echo "Invalid services.json" && exit 1)
+
+      - name: Read config.json
+        id: config
+        run: |
+          DOMAIN=$(jq -r '.domain' config.json)
+          LOCAL_DOMAIN=$(jq -r '.local_domain' config.json)
+          BIND_IP=$(jq -r '.bind_ip' config.json)
+          SERVER_SSH_ADDRESS=$(jq -r '.server_ssh_address' config.json)
+          SERVER_SSH_USERNAME=$(jq -r '.server_ssh_username' config.json)
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
+          echo "LOCAL_DOMAIN=$LOCAL_DOMAIN" >> $GITHUB_ENV
+          echo "BIND_IP=$BIND_IP" >> $GITHUB_ENV
+          echo "SERVER_SSH_ADDRESS=$SERVER_SSH_ADDRESS" >> $GITHUB_ENV
+          echo "SERVER_SSH_USERNAME=$SERVER_SSH_USERNAME" >> $GITHUB_ENV
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      - name: Generate tfvars
+        run: |
+          echo 'cloudflare_account_id = "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"' > terraform/terraform.tfvars
+          echo 'domain = "'$DOMAIN'"' >> terraform/terraform.tfvars
+          echo 'local_domain = "'$LOCAL_DOMAIN'"' >> terraform/terraform.tfvars
+          echo 'bind_ip = "'$BIND_IP'"' >> terraform/terraform.tfvars
+          echo 'services = $(cat services.json)' >> terraform/terraform.tfvars
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./terraform
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -var="cloudflare_api_token=${{ secrets.CLOUDFLARE_API_TOKEN }}"
+        working-directory: ./terraform
+
+      - name: Get tunnel token
+        id: get_token
+        run: |
+          TOKEN=$(terraform output -raw tunnel_token)
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+        working-directory: ./terraform
+
+      - name: Generate Bind config
+        run: |
+          DOMAIN="${{ env.LOCAL_DOMAIN }}"
+          BIND_IP="${{ env.BIND_IP }}"
+          # Generate named.conf.local
+          echo 'zone "'$DOMAIN'" {' > bind/config/named.conf.local
+          echo '  type master;' >> bind/config/named.conf.local
+          echo '  file "/var/lib/bind/db.'$DOMAIN'";' >> bind/config/named.conf.local
+          echo '};' >> bind/config/named.conf.local
+          # Generate zone file
+          echo "\$TTL 3600" > bind/zones/db.$DOMAIN
+          echo "@ IN SOA ns1.$DOMAIN. admin.$DOMAIN. (" >> bind/zones/db.$DOMAIN
+          echo "  1         ; Serial" >> bind/zones/db.$DOMAIN
+          echo "  604800    ; Refresh" >> bind/zones/db.$DOMAIN
+          echo "  86400     ; Retry" >> bind/zones/db.$DOMAIN
+          echo "  2419200   ; Expire" >> bind/zones/db.$DOMAIN
+          echo "  604800 )  ; Negative Cache TTL" >> bind/zones/db.$DOMAIN
+          echo "" >> bind/zones/db.$DOMAIN
+          echo "@ IN NS ns1.$DOMAIN." >> bind/zones/db.$DOMAIN
+          echo "ns1 IN A $BIND_IP" >> bind/zones/db.$DOMAIN
+          # Add A records using jq
+          jq -r '.[] | "\(.subdomain) IN A \(.local_ip)"' services.json >> bind/zones/db.$DOMAIN
+
+      - name: Add SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Deploy certificates
+        run: |
+          ssh ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }} "mkdir -p /path/to/deploy/certs"
+          scp certs/generate_certs.sh ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }}:/path/to/deploy/certs/
+          scp config.json services.json ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }}:/path/to/deploy/certs/
+          ssh ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }} "cd /path/to/deploy/certs && bash generate_certs.sh"
+
+      - name: Copy files to server
+        run: |
+          scp -r bind docker-compose.yml ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }}:/path/to/deploy
+          scp -r certs/certs ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }}:/path/to/deploy/certs
+
+      - name: Deploy to server
+        run: |
+          ssh ${{ env.SERVER_SSH_USERNAME }}@${{ env.SERVER_SSH_ADDRESS }} "cd /path/to/deploy && TUNNEL_TOKEN=${{ env.TOKEN }} docker compose up -d"
